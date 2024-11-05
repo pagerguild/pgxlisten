@@ -1,4 +1,4 @@
-module github.com/jackc/pgxlisten
+module github.com/pagerguild/pgxlisten
 
 go 1.23.2
 
