@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxtest"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jackc/pgxlisten"
+	"github.com/pagerguild/pgxlisten"
 )
 
 var (
