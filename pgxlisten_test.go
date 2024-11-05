@@ -2,18 +2,55 @@ package pgxlisten_test
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxtest"
-	"github.com/jackc/pgxlisten"
 	"github.com/stretchr/testify/require"
+
+	"github.com/jackc/pgxlisten"
 )
 
-var defaultConnTestRunner pgxtest.ConnTestRunner = pgxtest.DefaultConnTestRunner()
+var (
+	connString            = os.Getenv("DATABASE_URL")
+	defaultConnTestRunner pgxtest.ConnTestRunner
+)
 
+func init() {
+	// Set up the default connection string from an environment variable or default
+	if connString == "" {
+		connString = "postgres://postgres:password@localhost/guilde?sslmode=disable"
+	}
+
+	// Customize the ConnTestRunner
+	defaultConnTestRunner = pgxtest.ConnTestRunner{
+		// CreateConfig generates a *pgx.ConnConfig from the connection string
+		CreateConfig: func(ctx context.Context, t testing.TB) *pgx.ConnConfig {
+			config, err := pgx.ParseConfig(connString)
+			if err != nil {
+				t.Fatalf("ParseConfig failed: %v", err)
+			}
+			return config
+		},
+		// Optional: setup actions right after connection creation, if needed
+		AfterConnect: func(ctx context.Context, t testing.TB, conn *pgx.Conn) {
+			// e.g., setting application-specific parameters or initializing extensions
+		},
+		// Optional: validation or cleanup actions after each test
+		AfterTest: func(ctx context.Context, t testing.TB, conn *pgx.Conn) {
+			// e.g., verifying connection state or cleaning up test artifacts
+		},
+		// CloseConn simply closes the connection, handling errors if they arise
+		CloseConn: func(ctx context.Context, t testing.TB, conn *pgx.Conn) {
+			if err := conn.Close(ctx); err != nil {
+				t.Errorf("CloseConn failed: %v", err)
+			}
+		},
+	}
+}
 func TestListenerListenDispatchesNotifications(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
 	defer cancel()
