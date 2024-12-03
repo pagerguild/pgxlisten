@@ -11,6 +11,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+const (
+	defaultKeepaliveTimeout = 30 * time.Second
+)
+
 // Listener connects to a PostgreSQL server, listens for notifications, and dispatches them to handlers based on
 // channel.
 type Listener struct {
@@ -23,11 +27,22 @@ type Listener struct {
 	// attempted again later. LogError is optional.
 	LogError func(context.Context, error)
 
+	LogDebug func(context.Context, string)
+
 	// ReconnectDelay configures the amount of time to wait before reconnecting in case the connection to the database
 	// is lost. If set to 0, the default of 1 minute is used. A negative value disables the timeout entirely.
 	ReconnectDelay time.Duration
 
 	handlers map[string]Handler
+
+	KeepaliveTimeout time.Duration
+}
+
+func (l *Listener) keepaliveTime() time.Duration {
+	if l.KeepaliveTimeout == 0 {
+		return defaultKeepaliveTimeout
+	}
+	return l.KeepaliveTimeout
 }
 
 // Handle sets the handler for notifications sent to channel.
@@ -85,7 +100,11 @@ func (l *Listener) listen(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
-	defer conn.Close(ctx)
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			l.logError(ctx, err)
+		}
+	}()
 
 	for channel, handler := range l.handlers {
 		_, err := conn.Exec(ctx, "listen "+pgx.Identifier{channel}.Sanitize())
@@ -102,21 +121,42 @@ func (l *Listener) listen(ctx context.Context) error {
 	}
 
 	for {
-		notification, err := conn.WaitForNotification(ctx)
-		if err != nil {
-			return fmt.Errorf("waiting for notification: %w", err)
-		}
-
-		if handler, ok := l.handlers[notification.Channel]; ok {
-			err := handler.HandleNotification(ctx, notification, conn)
-			if err != nil {
-				l.logError(ctx, fmt.Errorf("handle %s notification: %w", notification.Channel, err))
-			}
-		} else {
-			l.logError(ctx, fmt.Errorf("missing handler: %s", notification.Channel))
+		if err := l.waitOnce(ctx, conn); err != nil {
+			return err
 		}
 	}
+}
 
+// waitOnce waits for a notification or a keepalive timeout, whichever comes
+// first.  Note that ONLY the WaitForNotification call takes place with a
+// timeout, and all other calls use the parent context.  Only the Wait call
+// needs a timeout here, and the rest use the parent context.
+func (l *Listener) waitOnce(parentCtx context.Context, conn *pgx.Conn) error {
+	timedCtx, cancel := context.WithTimeout(parentCtx, l.keepaliveTime())
+	defer cancel()
+
+	notification, err := conn.WaitForNotification(timedCtx)
+	if errors.Is(err, context.DeadlineExceeded) {
+		if keepaliveErr := conn.Ping(parentCtx); keepaliveErr != nil {
+			return fmt.Errorf("keepalive failed after timeout (%w): %w", err, keepaliveErr)
+		}
+		if l.LogDebug != nil {
+			l.LogDebug(timedCtx, "keepalive timed out")
+		}
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("waiting for notification: %w", err)
+	}
+
+	if handler, ok := l.handlers[notification.Channel]; ok {
+		err := handler.HandleNotification(parentCtx, notification, conn)
+		if err != nil {
+			l.logError(parentCtx, fmt.Errorf("handle %s notification: %w", notification.Channel, err))
+		}
+	} else {
+		l.logError(parentCtx, fmt.Errorf("missing handler: %s", notification.Channel))
+	}
+	return nil
 }
 
 func (l *Listener) logError(ctx context.Context, err error) {
