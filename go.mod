@@ -1,6 +1,6 @@
 module github.com/pagerguild/pgxlisten
 
-go 1.23.2
+go 1.22
 
 require (
 	github.com/jackc/pgx/v5 v5.7.1
